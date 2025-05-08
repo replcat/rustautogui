@@ -129,20 +129,42 @@ impl Screen {
                 "Failed to capture screen image".to_string(),
             ))?;
 
-        let pixel_data: Vec<u8> = image
-            .data()
-            .bytes()
-            .chunks(4)
-            .flat_map(|chunk| {
-                // reorder color components
-                if let &[b, g, r, a] = chunk {
-                    vec![r, g, b, a]
-                } else {
-                    unreachable!()
-                }
-            })
-            .collect();
-        self.screen_data.pixel_data = pixel_data;
+        // CGImage rows can include padding bytes for memory alignment, causing
+        // the actual bytes_per_row to be greater than width * bytes_per_pixel.
+
+        // We'll get the system-reported bytes_per_row for source offsets, then
+        // copy the CoreGraphics BGRA data into a tightly-packed RGBA buffer.
+
+        let width = image.width() as usize;
+        let height = image.height() as usize;
+        let bytes_per_row = image.bytes_per_row() as usize;
+        let bytes_per_pixel = image.bits_per_pixel() as usize / 8;
+
+        let mut aligned_rgba_buffer = vec![0u8; width * height * 4];
+        let raw_image_data = image.data();
+
+        // sanity check -- this could reasonably be an assert
+        if (raw_image_data.len() as usize) < bytes_per_row * height {
+            return Err(AutoGuiError::OSFailure(
+                "CoreGraphics data from captured screen image had unexpected length".to_string(),
+            ));
+        }
+
+        for y in 0..height {
+            for x in 0..width {
+                // source offset, accounting for padding
+                let src_offset = y * bytes_per_row + x * bytes_per_pixel;
+                // packed destination offset (width * 4 bytes per row)
+                let dst_offset = (y * width + x) * 4;
+
+                // BGRA (CoreGraphics) -> RGBA
+                aligned_rgba_buffer[dst_offset + 0] = raw_image_data[src_offset + 2];
+                aligned_rgba_buffer[dst_offset + 1] = raw_image_data[src_offset + 1];
+                aligned_rgba_buffer[dst_offset + 2] = raw_image_data[src_offset + 0];
+                aligned_rgba_buffer[dst_offset + 3] = raw_image_data[src_offset + 3];
+            }
+        }
+        self.screen_data.pixel_data = aligned_rgba_buffer;
         Ok(())
     }
     #[cfg(not(feature = "lite"))]
